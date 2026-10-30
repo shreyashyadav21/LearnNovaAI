@@ -1,4 +1,4 @@
 streamlit
-ollama
+pypdf
 chromadb
-pypdf>=3.4
+ollama

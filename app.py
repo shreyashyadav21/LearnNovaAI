@@ -1,6 +1,5 @@
 import streamlit as st
 from groq import Groq
-from openai import OpenAI
 import chromadb
 import pypdf
 import hashlib
@@ -83,20 +82,19 @@ with st.sidebar:
     st.markdown("3. Ask questions from your notes")
     st.markdown("4. Practise with exam materials")
     st.markdown("---")
-    st.caption("Groq + OpenAI embeddings + ChromaDB")
+    st.caption("Groq + local embeddings + ChromaDB")
 
 # ==========================================
 # 2. SETTINGS, DATABASE CONNECTION, EMBEDDING HELPERS
 # ==========================================
 CHAT_MODEL = "openai/gpt-oss-20b"
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 1536
+EMBEDDING_DIMENSIONS = 768
 SUMMARY_VERSION = 2
 TOPIC_SUGGESTION_VERSION = 2
 
-# Hosted embedding vectors use a different model space from the old Ollama
-# vectors, so this version creates a fresh ChromaDB collection.
-EMBEDDING_VERSION = "openai_v1"
+# The local vectorizer has its own vector space; use a fresh collection rather
+# than mixing its vectors with older hosted or Ollama embeddings.
+EMBEDDING_VERSION = "local_hash_v1"
 
 
 def get_api_key(name):
@@ -120,45 +118,61 @@ def get_groq_client(api_key):
     return Groq(api_key=api_key)
 
 
-@st.cache_resource(show_spinner=False)
-def get_openai_client(api_key):
-    return OpenAI(api_key=api_key)
-
-
 def groq_client():
     return get_groq_client(get_api_key("GROQ_API_KEY"))
-
-
-def openai_client():
-    return get_openai_client(get_api_key("OPENAI_API_KEY"))
 
 
 client = chromadb.PersistentClient(path="./studymate_db")
 
 
+def embed_text(text):
+    """Create a deterministic, normalized feature vector without an API call."""
+    stop_words = {
+        "a", "an", "and", "are", "as", "at", "be", "been", "by", "for",
+        "from", "in", "into", "is", "it", "of", "on", "or", "that", "the",
+        "their", "this", "to", "was", "were", "with"
+    }
+    tokens = []
+    for token in re.findall(r"[a-z0-9]+", text.casefold()):
+        if token.endswith("ies") and len(token) > 5:
+            token = token[:-3] + "y"
+        elif token.endswith(("ing", "ed")) and len(token) > 5:
+            token = token[:-3] if token.endswith("ing") else token[:-2]
+        elif token.endswith("s") and len(token) > 4:
+            token = token[:-1]
+        if len(token) > 1 and token not in stop_words:
+            tokens.append(token)
+
+    features = Counter(tokens)
+    features.update({
+        f"{left}_{right}": 0.6
+        for left, right in zip(tokens, tokens[1:])
+    })
+    vector = [0.0] * EMBEDDING_DIMENSIONS
+    for feature, weight in features.items():
+        digest = hashlib.blake2b(
+            feature.encode("utf-8"),
+            digest_size=8
+        ).digest()
+        hashed = int.from_bytes(digest, byteorder="little")
+        bucket = hashed % EMBEDDING_DIMENSIONS
+        sign = 1.0 if hashed & (1 << 63) else -1.0
+        vector[bucket] += sign * weight
+
+    magnitude = sum(value * value for value in vector) ** 0.5
+    if magnitude:
+        vector = [value / magnitude for value in vector]
+    return vector
+
+
 def embed_texts(texts):
-    """Embed document chunks for storage and semantic ChromaDB search."""
-    if not texts:
-        return []
-    response = openai_client().embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=texts,
-        dimensions=EMBEDDING_DIMENSIONS
-    )
-    return [
-        item.embedding
-        for item in sorted(response.data, key=lambda item: item.index)
-    ]
+    """Create local vectors for document storage and ChromaDB retrieval."""
+    return [embed_text(text) for text in texts]
 
 
 def embed_query(text):
-    """Create a query vector in the same space as stored document vectors."""
-    response = openai_client().embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=[text],
-        dimensions=EMBEDDING_DIMENSIONS
-    )
-    return response.data[0].embedding
+    """Create a query vector in the same local feature space as PDF chunks."""
+    return embed_text(text)
 
 
 # ==========================================
@@ -1581,8 +1595,8 @@ with chat_tab:
             except Exception as error:
                 answer = (
                     "Could not answer this question. Confirm GROQ_API_KEY "
-                    "and OPENAI_API_KEY are configured and valid, and that "
-                    "their hosted APIs are reachable.\n\n"
+                    "is configured and valid, and that the Groq API is "
+                    "reachable.\n\n"
                     f"Details: {error}"
                 )
                 st.error(answer)
@@ -2322,6 +2336,6 @@ with exam_tab:
 
 st.divider()
 st.caption(
-    "StudyMate AI | Groq, OpenAI embeddings, and ChromaDB. "
+    "StudyMate AI | Groq, local feature vectors, and ChromaDB. "
     "Always review generated answers against your original notes."
 )

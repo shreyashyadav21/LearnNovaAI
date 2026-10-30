@@ -1,16 +1,17 @@
 # LearnNova AI
 
 LearnNova AI is a Streamlit study assistant for PDF notes. It uses Groq for
-chat generation, OpenAI embeddings for semantic search, and ChromaDB to store
-and retrieve document passages. It does not require a locally running Ollama
-server.
+chat generation, deterministic local feature vectors for document search, and
+ChromaDB to store and retrieve document passages. It does not require a
+locally running Ollama server or a separate embedding API key.
 
 ## Features
 
 - Upload multiple PDFs and choose an active document.
 - Extract selectable PDF text with `pypdf`; optionally OCR scanned pages.
 - Ask source-grounded questions, including follow-ups, with streamed answers.
-- Search the document through OpenAI embeddings and ChromaDB vector retrieval.
+- Search the document through local feature hashing and ChromaDB vector
+  retrieval.
 - Generate and download a fast extractive PDF summary.
 - Create MCQs, short- and long-answer questions, passage-based and mixed
   questions, revision notes, and flashcards from source statements.
@@ -20,13 +21,11 @@ server.
 
 - Python 3.10 or later
 - A [Groq API key](https://console.groq.com/keys)
-- An [OpenAI API key](https://platform.openai.com/api-keys) with access to the
-  embeddings API
 - The Python packages in [`requirements.txt`](requirements.txt)
 
-Groq generates chat answers. OpenAI's `text-embedding-3-small` model embeds
-PDF chunks and questions. Both services are accessed over HTTPS; the PDF
-content used for indexing and question answering is sent to these hosted APIs.
+Groq generates chat answers. PDF and query vectors are created locally with a
+deterministic feature-hashing vectorizer. Only chat prompts and retrieved
+passages are sent to Groq.
 
 ## Run locally on Windows
 
@@ -45,7 +44,6 @@ own keys; never put real keys in source code or commit them:
 
 ```powershell
 $env:GROQ_API_KEY = "your-groq-api-key"
-$env:OPENAI_API_KEY = "your-openai-api-key"
 ```
 
 Run the app:
@@ -64,7 +62,6 @@ Create `.streamlit/secrets.toml` locally:
 
 ```toml
 GROQ_API_KEY = "your-groq-api-key"
-OPENAI_API_KEY = "your-openai-api-key"
 ```
 
 Keep this file private and out of version control. On Render or another host,
@@ -91,7 +88,6 @@ committing a secrets file.
 
    ```text
    GROQ_API_KEY     = your Groq API key
-   OPENAI_API_KEY   = your OpenAI API key
    ```
 
 5. Deploy and open the Render URL. No Ollama service or `OLLAMA_HOST`
@@ -111,15 +107,16 @@ that mount before relying on indexes across deployments.
    normalizes it. Optional OCR can process pages without selectable text.
 3. **Chunk:** Text is split into overlapping word chunks so adjacent chunks
    retain context across boundaries.
-4. **Embed:** On the first indexing run, the app sends each chunk in batches
-   to OpenAI's `text-embedding-3-small` model. The resulting 1,536-dimensional
-   vectors are saved with their text and chunk-order metadata.
+4. **Vectorize:** The app hashes normalized words and word pairs into
+   deterministic, normalized 768-dimensional vectors locally. No embedding
+   API key or network request is needed.
 5. **Store:** ChromaDB persists the vectors in a collection for the selected
    document. The collection name includes the PDF hash and embedding-version
    suffix.
-6. **Ask:** A question is embedded using the same OpenAI model. ChromaDB
-   retrieves semantically similar chunks, which are lightly re-ranked by
-   matching topic terms.
+6. **Ask:** The question is vectorized with the same local feature hasher.
+   ChromaDB retrieves similar chunks, which are lightly re-ranked by matching
+   topic terms. Feature hashing is fast and private, but less semantically
+   capable than a trained embedding model.
 7. **Answer:** The question, recent conversation history, and retrieved notes
    are sent to Groq's chat API. Groq streams its response into the UI.
 
@@ -135,18 +132,18 @@ The current model settings in `app.py` are:
 
 ```python
 CHAT_MODEL = "openai/gpt-oss-20b"
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 1536
+EMBEDDING_DIMENSIONS = 768
 ```
 
-API keys are read from the `GROQ_API_KEY` and `OPENAI_API_KEY` environment
-variables, with Streamlit secrets as a fallback. Missing keys produce an
-explicit configuration error when their hosted feature is used.
+The `GROQ_API_KEY` is read from the environment, with Streamlit secrets as a
+fallback. It is needed for chat answers and AI-generated flashcards. PDF
+indexing, summaries, revision notes, MCQs, and other locally generated exam
+formats do not require a provider key.
 
-The app uses a new ChromaDB collection suffix, `openai_v1`, because OpenAI
-vectors cannot be mixed with the older Ollama embeddings. Existing `v3`
-collections are left in place but are not used by the current app. Upload the
-PDF again if its new collection has not been indexed yet.
+The app uses a new ChromaDB collection suffix, `local_hash_v1`, because local
+feature vectors cannot be mixed with the older Ollama or OpenAI embeddings.
+Existing collections are left in place but are not used by the current app.
+Upload the PDF again if its new collection has not been indexed yet.
 
 ## Optional OCR for scanned PDFs
 
@@ -182,24 +179,17 @@ they are separate from the website and are not needed to run `app.py`.
 
 ## Troubleshooting
 
-### Missing `GROQ_API_KEY` or `OPENAI_API_KEY`
+### Missing `GROQ_API_KEY`
 
-Set both keys in the environment where Streamlit runs. For Render, add them
-in the web service's **Environment** settings and redeploy. Never paste API
-keys into chat, source code, or a public repository.
+Set the key in the environment where Streamlit runs. For Render, add it in
+the web service's **Environment** settings and redeploy. Never paste API keys
+into chat, source code, or a public repository.
 
 ### Invalid key, quota, or network error
 
 Check that each key belongs to the correct provider, is active, and has API
 access/billing available as required by that provider. Check the Render logs
 for the provider's error response.
-
-### PDF indexing fails
-
-Indexing requires the OpenAI API key because the app must embed the PDF
-chunks. Check the key and network access. The first run sends the document
-text for embedding; later runs can reuse the local ChromaDB index if the
-hosting filesystem preserves it.
 
 ### PDF has no readable text
 
@@ -218,9 +208,9 @@ Use the virtual environment's Python directly:
 
 ## Privacy and limitations
 
-- Chat prompts, selected PDF passages, and PDF text sent for embeddings are
-  processed by Groq and OpenAI. Do not upload documents unless this processing
-  is permitted for their contents.
+- Chat prompts and selected PDF passages are sent to Groq to generate
+  answers. Document embeddings are created locally and are not sent to an
+  embedding provider.
 - ChromaDB stores the indexed chunks locally in `studymate_db`; protect this
   directory if it contains sensitive material.
 - The quality of answers depends on the PDF extraction and retrieved

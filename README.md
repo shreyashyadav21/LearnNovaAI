@@ -83,6 +83,50 @@ python -m streamlit run app.py
 Streamlit prints a local URL, usually `http://localhost:8501`. Open it in your
 browser, upload a PDF, and select it as the active document.
 
+## Deploying the website
+
+Deploying the Streamlit app does **not** deploy Ollama automatically. The
+website process and the Ollama service must both be running, and the deployed
+website must be able to reach the Ollama server over the network. The app
+supports configuring this address with `OLLAMA_HOST`.
+
+For local development, the default is:
+
+```text
+http://localhost:11434
+```
+
+In a hosted deployment, `localhost` refers to the deployed app's own machine,
+not your personal computer. If Ollama is running on your computer while the
+website is hosted elsewhere, the hosted website cannot reach it through
+`localhost`. Run Ollama on a server reachable by the deployed app, or use a
+properly secured private network/tunnel between the app and Ollama.
+
+Configure `OLLAMA_HOST` in the deployment platform's environment variables,
+or in Streamlit Community Cloud's app secrets:
+
+```toml
+OLLAMA_HOST = "https://your-secured-ollama-endpoint.example.com"
+```
+
+The value should be the base URL of the Ollama server, without an API path.
+Install both required models on that server:
+
+```bash
+ollama pull qwen2.5:3b
+ollama pull nomic-embed-text
+```
+
+Do **not** expose Ollama's default port directly to the public internet:
+Ollama does not provide authentication by default. Put it behind a secured
+gateway/reverse proxy with authentication and TLS, or make it accessible only
+over a private network. Keep the endpoint and any gateway credentials out of
+source code and configure them using deployment secrets.
+
+ChromaDB uses a local `studymate_db` directory. On hosting platforms with
+ephemeral filesystems, the index may need to be rebuilt after a restart or
+redeployment. Use persistent storage if indexes must survive deployments.
+
 ## Optional OCR for scanned PDFs
 
 OCR is optional; ordinary text-based PDFs do not need it. The app attempts to
@@ -181,18 +225,23 @@ EMBED_MODEL = "nomic-embed-text"
 client = chromadb.PersistentClient(path="./studymate_db")
 ```
 
-If you change a model name, pull that model with Ollama before running the
-app. The embedding model is needed when indexing a new PDF; the chat model is
-needed for question answering.
+The Ollama server address is read from the `OLLAMA_HOST` environment variable
+or Streamlit secret. If neither is configured, it defaults to
+`http://localhost:11434`. If you change a model name, pull that model on the
+configured Ollama server before running the app. The embedding model is needed
+when indexing a new PDF; the chat model is needed for question answering.
 
 ## Troubleshooting
 
 ### Ollama connection error
 
-- Confirm Ollama is installed and running.
-- In a terminal, run `ollama list` and verify both required models appear.
-- If Ollama is not running as a service, start `ollama serve` in a separate
-  terminal and retry.
+- Confirm Ollama is running at the address configured by `OLLAMA_HOST`.
+- For local development, run `ollama list` and verify both required models
+  appear. If Ollama is not running as a service, start `ollama serve` in a
+  separate terminal.
+- For a deployed website, `localhost` means the app server itself. Configure
+  `OLLAMA_HOST` to a secure Ollama endpoint reachable from that server and
+  verify the models are installed there.
 
 ### Model not found
 

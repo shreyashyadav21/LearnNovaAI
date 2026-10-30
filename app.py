@@ -6,7 +6,9 @@ import hashlib
 import html
 import re
 import io
+import os
 from collections import Counter
+from streamlit.errors import StreamlitSecretNotFoundError
 
 # Optional OCR support for scanned PDFs.
 # If these imports fail, the app still works normally for text PDFs.
@@ -95,13 +97,21 @@ TOPIC_SUGGESTION_VERSION = 2
 # changes, preventing stale chunks from bypassing the updated reader.
 EMBEDDING_VERSION = "v3"
 
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "").strip()
+if not OLLAMA_HOST:
+    try:
+        OLLAMA_HOST = st.secrets["OLLAMA_HOST"].strip()
+    except (KeyError, StreamlitSecretNotFoundError):
+        OLLAMA_HOST = "http://localhost:11434"
+
+ollama_client = ollama.Client(host=OLLAMA_HOST)
 client = chromadb.PersistentClient(path="./studymate_db")
 
 
 def embed_texts(texts):
     """Embed a batch of document chunks with the document prefix."""
     inputs = [f"search_document: {text}" for text in texts]
-    result = ollama.embed(model=EMBED_MODEL, input=inputs)
+    result = ollama_client.embed(model=EMBED_MODEL, input=inputs)
     return result["embeddings"]
 
 
@@ -807,7 +817,7 @@ do not cover something, say so. Explain technical terms simply and stay focused.
             "covered by them, say so instead of inventing it."
         )
     })
-    response = ollama.chat(
+    response = ollama_client.chat(
         model=CHAT_MODEL,
         messages=messages,
         stream=True,
@@ -1414,7 +1424,7 @@ RULES:
 SOURCE PASSAGES:
 {context}
 """
-    response = ollama.chat(
+    response = ollama_client.chat(
         model=CHAT_MODEL,
         messages=[
             {
@@ -1506,8 +1516,11 @@ with chat_tab:
 
             except Exception as error:
                 answer = (
-                    "Could not answer this question. Check that Ollama is "
-                    f"running and both models are available.\n\nDetails: {error}"
+                    "Could not answer this question. Confirm Ollama is "
+                    "running at the configured OLLAMA_HOST, the address is "
+                    "reachable from the deployed app, and the required "
+                    "models are installed on that Ollama server.\n\n"
+                    f"Details: {error}"
                 )
                 st.error(answer)
 

@@ -1,5 +1,6 @@
 import streamlit as st
-import ollama
+from groq import Groq
+from openai import OpenAI
 import chromadb
 import pypdf
 import hashlib
@@ -82,37 +83,82 @@ with st.sidebar:
     st.markdown("3. Ask questions from your notes")
     st.markdown("4. Practise with exam materials")
     st.markdown("---")
-    st.caption("Powered locally by Ollama + ChromaDB")
+    st.caption("Groq + OpenAI embeddings + ChromaDB")
 
 # ==========================================
 # 2. SETTINGS, DATABASE CONNECTION, EMBEDDING HELPERS
 # ==========================================
-CHAT_MODEL = "qwen2.5:3b"
-EMBED_MODEL = "nomic-embed-text"
+CHAT_MODEL = "openai/gpt-oss-20b"
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMENSIONS = 1536
 SUMMARY_VERSION = 2
 TOPIC_SUGGESTION_VERSION = 2
 
-# nomic-embed-text expects task prefixes ("search_document:", "search_query:").
-# Bumping this version rebuilds collections when the PDF extraction pipeline
-# changes, preventing stale chunks from bypassing the updated reader.
-EMBEDDING_VERSION = "v3"
+# Hosted embedding vectors use a different model space from the old Ollama
+# vectors, so this version creates a fresh ChromaDB collection.
+EMBEDDING_VERSION = "openai_v1"
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "").strip()
-if not OLLAMA_HOST:
-    try:
-        OLLAMA_HOST = st.secrets["OLLAMA_HOST"].strip()
-    except (KeyError, StreamlitSecretNotFoundError):
-        OLLAMA_HOST = "http://localhost:11434"
 
-ollama_client = ollama.Client(host=OLLAMA_HOST)
+def get_api_key(name):
+    """Read a provider key from the environment or Streamlit secrets."""
+    api_key = os.getenv(name, "").strip()
+    if not api_key:
+        try:
+            api_key = st.secrets[name].strip()
+        except (KeyError, StreamlitSecretNotFoundError):
+            pass
+    if not api_key:
+        raise RuntimeError(
+            f"Missing {name}. Set it as an environment variable or "
+            "Streamlit secret before using hosted AI features."
+        )
+    return api_key
+
+
+@st.cache_resource(show_spinner=False)
+def get_groq_client(api_key):
+    return Groq(api_key=api_key)
+
+
+@st.cache_resource(show_spinner=False)
+def get_openai_client(api_key):
+    return OpenAI(api_key=api_key)
+
+
+def groq_client():
+    return get_groq_client(get_api_key("GROQ_API_KEY"))
+
+
+def openai_client():
+    return get_openai_client(get_api_key("OPENAI_API_KEY"))
+
+
 client = chromadb.PersistentClient(path="./studymate_db")
 
 
 def embed_texts(texts):
-    """Embed a batch of document chunks with the document prefix."""
-    inputs = [f"search_document: {text}" for text in texts]
-    result = ollama_client.embed(model=EMBED_MODEL, input=inputs)
-    return result["embeddings"]
+    """Embed document chunks for storage and semantic ChromaDB search."""
+    if not texts:
+        return []
+    response = openai_client().embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=texts,
+        dimensions=EMBEDDING_DIMENSIONS
+    )
+    return [
+        item.embedding
+        for item in sorted(response.data, key=lambda item: item.index)
+    ]
+
+
+def embed_query(text):
+    """Create a query vector in the same space as stored document vectors."""
+    response = openai_client().embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=[text],
+        dimensions=EMBEDDING_DIMENSIONS
+    )
+    return response.data[0].embedding
 
 
 # ==========================================
@@ -421,29 +467,44 @@ if st.session_state.get("active_document") != file_hash:
 # 6. SHARED RETRIEVAL, COVERAGE, DISPLAY, AND CHAT FUNCTIONS
 # ==========================================
 def retrieve_context(search_text, number_of_chunks=3):
-    """Quickly rank cached notes by question terms without another model call."""
-    documents = get_all_document_chunks()
-    if not documents:
+    """Retrieve semantically relevant passages from the active ChromaDB index."""
+    collection_size = collection.count()
+    if not collection_size:
         return [], [], []
 
+    candidate_count = min(number_of_chunks * 3, collection_size)
+    results = collection.query(
+        query_embeddings=[embed_query(search_text)],
+        n_results=candidate_count,
+        include=["documents", "distances", "metadatas"]
+    )
+    passages = results["documents"][0] or []
+    distances = results["distances"][0] or []
+    metadatas = results["metadatas"][0] or []
     terms = study_topic_terms(search_text)
     ranked = []
-    for index, passage in enumerate(documents):
+    for passage, distance, metadata in zip(passages, distances, metadatas):
         passage_terms = study_topic_terms(passage)
         matches = terms & passage_terms
-        if not terms:
-            score = 0
-        else:
-            score = (
-                len(matches) * 4
-                + sum(min(passage.casefold().count(term), 3) for term in matches)
-                + (len(matches) / len(terms))
-            )
-        ranked.append((score, index, passage))
+        total_hits = sum(
+            min(passage.casefold().count(term), 3)
+            for term in matches
+        )
+        ranked.append((
+            -len(matches),
+            -total_hits,
+            distance,
+            passage,
+            metadata
+        ))
 
-    ranked.sort(key=lambda item: (-item[0], item[1]))
-    passages = [item[2] for item in ranked[:number_of_chunks]]
-    return passages, [], []
+    ranked.sort(key=lambda item: item[:3])
+    selected = ranked[:number_of_chunks]
+    return (
+        [item[3] for item in selected],
+        [item[2] for item in selected],
+        [item[4] for item in selected]
+    )
 
 
 def topic_coverage_message(topic, passages):
@@ -817,19 +878,20 @@ do not cover something, say so. Explain technical terms simply and stay focused.
             "covered by them, say so instead of inventing it."
         )
     })
-    response = ollama_client.chat(
+    response = groq_client().chat.completions.create(
         model=CHAT_MODEL,
         messages=messages,
         stream=True,
-        keep_alive="10m",
-        options={
-            "temperature": 0,
-            "num_ctx": 4096,
-            "num_predict": 384
-        }
+        max_completion_tokens=384,
+        reasoning_effort="low",
+        reasoning_format="hidden"
     )
     for chunk in response:
-        content = chunk["message"]["content"]
+        content = (
+            chunk.choices[0].delta.content
+            if chunk.choices
+            else None
+        )
         if content:
             yield content
 
@@ -1424,7 +1486,7 @@ RULES:
 SOURCE PASSAGES:
 {context}
 """
-    response = ollama_client.chat(
+    response = groq_client().chat.completions.create(
         model=CHAT_MODEL,
         messages=[
             {
@@ -1436,9 +1498,11 @@ SOURCE PASSAGES:
             },
             {"role": "user", "content": prompt}
         ],
-        options={"temperature": 0, "num_ctx": 8192}
+        max_completion_tokens=2048,
+        reasoning_effort="low",
+        reasoning_format="hidden"
     )
-    return response["message"]["content"].strip()
+    return (response.choices[0].message.content or "").strip()
 
 
 # ==========================================
@@ -1516,10 +1580,9 @@ with chat_tab:
 
             except Exception as error:
                 answer = (
-                    "Could not answer this question. Confirm Ollama is "
-                    "running at the configured OLLAMA_HOST, the address is "
-                    "reachable from the deployed app, and the required "
-                    "models are installed on that Ollama server.\n\n"
+                    "Could not answer this question. Confirm GROQ_API_KEY "
+                    "and OPENAI_API_KEY are configured and valid, and that "
+                    "their hosted APIs are reachable.\n\n"
                     f"Details: {error}"
                 )
                 st.error(answer)
@@ -2259,6 +2322,6 @@ with exam_tab:
 
 st.divider()
 st.caption(
-    "StudyMate AI | Local AI with Ollama and ChromaDB. "
+    "StudyMate AI | Groq, OpenAI embeddings, and ChromaDB. "
     "Always review generated answers against your original notes."
 )

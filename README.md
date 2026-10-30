@@ -5,6 +5,9 @@ chat generation, deterministic local feature vectors for document search, and
 ChromaDB to store and retrieve document passages. It does not require a
 locally running Ollama server or a separate embedding API key.
 
+# working website link
+https://learnnovaai-jzkotuqbq9a48chth7vvme.streamlit.app/
+
 ## Features
 
 - Upload multiple PDFs and choose an active document.

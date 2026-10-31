@@ -150,11 +150,11 @@ Upload the PDF again if its new collection has not been indexed yet.
 
 ## Optional OCR for scanned PDFs
 
-Text-based PDFs do not need OCR. For scanned PDFs, install the optional Python
-packages:
+Text-based PDFs do not need OCR. The OCR Python packages are included in
+`requirements.txt`. Install them in the same environment used to run Streamlit:
 
 ```powershell
-python -m pip install PyMuPDF pytesseract Pillow
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 Install Tesseract OCR separately. The app currently expects
